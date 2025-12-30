@@ -368,6 +368,15 @@ async def get_ads():
 async def root():
     return {"status": "online", "last_run": get_now_br().strftime('%Y-%m-%d %H:%M:%S')}
 
+@app.post("/trigger")
+async def trigger_monitor():
+    """Manually trigger the monitor to run immediately"""
+    try:
+        await run_monitor()
+        return {"status": "success", "message": "Monitor executed successfully", "timestamp": get_now_br().strftime('%Y-%m-%d %H:%M:%S')}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "timestamp": get_now_br().strftime('%Y-%m-%d %H:%M:%S')}
+
 if __name__ == "__main__":
     # Initialize database
     init_database()
