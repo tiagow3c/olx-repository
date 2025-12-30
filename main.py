@@ -9,12 +9,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 import time
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from urllib.parse import urlparse
 
 # --- CONFIGURATION ---
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "re_JBZCpg9i_BWK4PPFr7Fx4UYdV8JBkwxdW")
 EMAIL_TO = os.getenv("EMAIL_TO", "tiago@controlle.com")
-DATA_FILE = "olx_seen_ads.json"
-ACCUMULATED_FILE = "olx_accumulated_ads.json"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 CITIES_CONFIG = {
     "Criciúma": "https://www.olx.com.br/autos-e-pecas/carros/estado-sc/sul-de-santa-catarina/criciuma-e-regiao",
@@ -44,20 +46,164 @@ CITIES_CONFIG = {
 
 resend.api_key = RESEND_API_KEY
 
+# --- DATABASE ---
+def get_db_connection():
+    """Get database connection"""
+    if not DATABASE_URL:
+        return None
+    return psycopg2.connect(DATABASE_URL)
+
+def init_database():
+    """Initialize database tables"""
+    if not DATABASE_URL:
+        print("No DATABASE_URL found, skipping database initialization")
+        return
+    
+    conn = get_db_connection()
+    if not conn:
+        return
+    
+    try:
+        cur = conn.cursor()
+        
+        # Create table for seen ads
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS seen_ads (
+                ad_id BIGINT PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create table for accumulated ads
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS accumulated_ads (
+                id SERIAL PRIMARY KEY,
+                ad_id BIGINT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                price TEXT,
+                url TEXT NOT NULL,
+                location TEXT,
+                city TEXT,
+                fipe TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        conn.commit()
+        cur.close()
+        print("Database initialized successfully")
+    except Exception as e:
+        print(f"Error initializing database: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+def is_ad_seen(ad_id):
+    """Check if ad has been seen"""
+    if not DATABASE_URL:
+        return False
+    
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM seen_ads WHERE ad_id = %s", (ad_id,))
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        return result is not None
+    except Exception as e:
+        print(f"Error checking seen ad: {e}")
+        if conn:
+            conn.close()
+        return False
+
+def mark_ad_seen(ad_id):
+    """Mark ad as seen"""
+    if not DATABASE_URL:
+        return
+    
+    conn = get_db_connection()
+    if not conn:
+        return
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO seen_ads (ad_id) VALUES (%s) ON CONFLICT (ad_id) DO NOTHING", (ad_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"Error marking ad seen: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+
+def save_accumulated_ad(ad):
+    """Save ad to accumulated ads"""
+    if not DATABASE_URL:
+        return
+    
+    conn = get_db_connection()
+    if not conn:
+        return
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO accumulated_ads (ad_id, title, price, url, location, city, fipe)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (ad_id) DO NOTHING
+        """, (ad['id'], ad['title'], ad['price'], ad['url'], ad['location'], ad['city'], ad['fipe']))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"Error saving accumulated ad: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+
+def get_accumulated_ads():
+    """Get all accumulated ads"""
+    if not DATABASE_URL:
+        return []
+    
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur.execute("""
+            SELECT ad_id as id, title, price, url, location, city, fipe, created_at
+            FROM accumulated_ads
+            ORDER BY created_at DESC
+        """)
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        # Convert to list of dicts and format datetime
+        ads = []
+        for row in results:
+            ad = dict(row)
+            if 'created_at' in ad and ad['created_at']:
+                ad['created_at'] = ad['created_at'].isoformat()
+            ads.append(ad)
+        
+        return ads
+    except Exception as e:
+        print(f"Error getting accumulated ads: {e}")
+        if conn:
+            conn.close()
+        return []
+
 # --- UTILS ---
 def get_now_br():
     return datetime.now(timezone(timedelta(hours=-3)))
-
-def load_json(filename, default):
-    if os.path.exists(filename):
-        with open(filename, 'r') as f:
-            try: return json.load(f)
-            except: return default
-    return default
-
-def save_json(filename, data):
-    with open(filename, 'w') as f:
-        json.dump(data, f)
 
 def parse_price(price_str):
     if not price_str: return 0.0
@@ -167,12 +313,12 @@ def send_email(new_ads):
             "subject": f"Monitor OLX: {len(new_ads)} novos carros!",
             "html": html_content,
         })
+        print(f"Email sent successfully with {len(new_ads)} ads")
     except Exception as e:
         print(f"Error sending email: {e}")
 
 async def run_monitor():
     print(f"Starting monitor run at {get_now_br()}")
-    seen_ads = set(load_json(DATA_FILE, []))
     all_new_ads = []
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
@@ -183,20 +329,15 @@ async def run_monitor():
         for url, target_cities in regions.items():
             ads = await scrape_region(browser, url, target_cities)
             for ad in ads:
-                if ad['id'] not in seen_ads:
+                if not is_ad_seen(ad['id']):
                     fipe_price_str = await get_ad_details(browser, ad['url'])
                     ad['fipe'] = fipe_price_str or "Não informado"
                     all_new_ads.append(ad)
-                    seen_ads.add(ad['id'])
+                    mark_ad_seen(ad['id'])
+                    save_accumulated_ad(ad)
         await browser.close()
     if all_new_ads:
         send_email(all_new_ads)
-        save_json(DATA_FILE, list(seen_ads))
-        # Update accumulated
-        existing_acc = load_json(ACCUMULATED_FILE, [])
-        existing_ids = {a['id'] for a in existing_acc}
-        to_add = [a for a in all_new_ads if a['id'] not in existing_ids]
-        save_json(ACCUMULATED_FILE, to_add + existing_acc)
         print(f"Run finished. {len(all_new_ads)} new ads found.")
     else:
         print("Run finished. No new ads found.")
@@ -214,17 +355,26 @@ def monitor_loop():
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database on startup"""
+    init_database()
+
 @app.get("/ads")
 async def get_ads():
-    return load_json(ACCUMULATED_FILE, [])
+    return get_accumulated_ads()
 
 @app.get("/")
 async def root():
     return {"status": "online", "last_run": get_now_br().strftime('%Y-%m-%d %H:%M:%S')}
 
 if __name__ == "__main__":
+    # Initialize database
+    init_database()
+    
     # Start monitor in a separate thread
     threading.Thread(target=monitor_loop, daemon=True).start()
+    
     # Start API
     import uvicorn
     port = int(os.getenv("PORT", 8000))
