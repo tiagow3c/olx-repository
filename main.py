@@ -253,18 +253,39 @@ async def get_ad_details(browser, ad_url):
     return fipe_price
 
 async def scrape_region(browser, url, target_cities):
-    context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        viewport={'width': 1920, 'height': 1080},
+        locale='pt-BR',
+        timezone_id='America/Sao_Paulo'
+    )
     page = await context.new_page()
     try:
         print(f"Scraping region: {url}")
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(5)
+        # Add extra headers
+        await page.set_extra_http_headers({
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Referer': 'https://www.olx.com.br/',
+        })
+        await page.goto(url, wait_until="networkidle", timeout=60000)
+        # Wait longer for JavaScript to load
+        await asyncio.sleep(10)
+        
+        # Try to get __NEXT_DATA__
         data_str = await page.evaluate("() => document.getElementById('__NEXT_DATA__')?.textContent")
         if not data_str:
-            print(f"No __NEXT_DATA__ found for {url}")
+            print(f"No __NEXT_DATA__ found, checking page content...")
+            # Check if we got a captcha or error page
+            page_content = await page.content()
+            if 'captcha' in page_content.lower() or 'blocked' in page_content.lower():
+                print(f"Page appears to be blocked/captcha for {url}")
+            else:
+                print(f"Page loaded but no data structure found")
             await page.close()
             await context.close()
             return []
+        
         data = json.loads(data_str)
         ads = data.get('props', {}).get('pageProps', {}).get('ads', [])
         print(f"Found {len(ads)} total ads in response")
