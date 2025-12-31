@@ -256,15 +256,18 @@ async def scrape_region(browser, url, target_cities):
     context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     page = await context.new_page()
     try:
+        print(f"Scraping region: {url}")
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         await asyncio.sleep(5)
         data_str = await page.evaluate("() => document.getElementById('__NEXT_DATA__')?.textContent")
         if not data_str:
+            print(f"No __NEXT_DATA__ found for {url}")
             await page.close()
             await context.close()
             return []
         data = json.loads(data_str)
         ads = data.get('props', {}).get('pageProps', {}).get('ads', [])
+        print(f"Found {len(ads)} total ads in response")
         results = []
         for ad in ads:
             ad_url = ad.get('url')
@@ -327,7 +330,9 @@ async def run_monitor():
             if url not in regions: regions[url] = []
             regions[url].append(city)
         for url, target_cities in regions.items():
+            print(f"Processing region with cities: {', '.join(target_cities)}")
             ads = await scrape_region(browser, url, target_cities)
+            print(f"Scraped {len(ads)} ads matching target cities")
             for ad in ads:
                 if not is_ad_seen(ad['id']):
                     fipe_price_str = await get_ad_details(browser, ad['url'])
