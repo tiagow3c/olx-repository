@@ -358,7 +358,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
+    print("=" * 50)
+    print("Starting OLX Monitor Service")
+    print(f"Time: {get_now_br().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 50)
     init_database()
+    print("Database initialized")
+    # Run monitor once on startup
+    print("Running initial monitor scan...")
+    try:
+        await run_monitor()
+        print("Initial scan completed successfully")
+    except Exception as e:
+        print(f"Initial scan error: {e}")
 
 @app.get("/ads")
 async def get_ads():
