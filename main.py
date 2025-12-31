@@ -389,6 +389,24 @@ async def trigger_monitor():
     except Exception as e:
         return {"status": "error", "message": str(e), "timestamp": get_now_br().strftime('%Y-%m-%d %H:%M:%S')}
 
+@app.post("/reset")
+async def reset_database():
+    """Reset the seen ads database (for testing)"""
+    if not DATABASE_URL:
+        return {"status": "error", "message": "No database configured"}
+    
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM seen_ads")
+        conn.commit()
+        count = cur.rowcount
+        cur.close()
+        conn.close()
+        return {"status": "success", "message": f"Reset complete. Deleted {count} seen ads.", "timestamp": get_now_br().strftime('%Y-%m-%d %H:%M:%S')}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "timestamp": get_now_br().strftime('%Y-%m-%d %H:%M:%S')}
+
 if __name__ == "__main__":
     # Initialize database
     init_database()
